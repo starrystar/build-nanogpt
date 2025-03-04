@@ -82,11 +82,13 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
+        # nn.ModuleDict像是nn.ModuleList，可以使用对应的名字获取该子Module
+        # 这里的wte、wpe等等都是对应到play.ipynb中加载好的state_dict的
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd), # Transformer图中的OutputEmbedding
+            wpe = nn.Embedding(config.block_size, config.n_embd), # Transformer图Positional Encoding
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # h[0]对应Transformer图DecoderBlock即灰色块
+            ln_f = nn.LayerNorm(config.n_embd), # yuque中GPT2论文的最后一层是layernorm，是新添加的层
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
