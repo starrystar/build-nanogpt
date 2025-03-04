@@ -33,18 +33,27 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention，当 is_causal=True 时，函数会自动生成一个下三角矩阵作为掩码
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         return y
+
+        # 视频里的实现方法（是旧的提交）
+        # self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
+        # B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        # # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
 
 class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.gelu    = nn.GELU(approximate='tanh')
+        self.gelu    = nn.GELU(approximate='tanh') # tanh是Gelu的近似计算版本，用于加速
         self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT = 1
 
@@ -61,10 +70,11 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.mlp = MLP(config) # 即FFN
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+        # Trans DeBlock中Y=ln{X+drop[attn(X)]}。而下面的代码是GPT-2对Transformer的改进，梯度从输出开始计算就是一个加法，使得从top开始的梯度可以分为两个分支，残差分支的梯度直接从最后的输出到了输入，另一个分支则经过一系列复杂的层的变化到达输入。
+        x = x + self.attn(self.ln_1(x)) 
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -77,18 +87,30 @@ class GPTConfig:
     n_embd: int = 768 # embedding dimension
 
 class GPT(nn.Module):
+    # 注意！！！！
+    # 注意！！！！
+    # 注意！！！！
+    # 本实现不包含在训练和eval时表现不同的modules和layers（如dropout、batchnorm或其他层）
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
+        # nn.ModuleDict像是nn.ModuleList，可以使用对应的名字获取该子Module
+        # 这里的wte、wpe等等都是对应到play.ipynb中的state_dict：
+        #    transformer.wpe.weight torch.Size([1024, 768]) # position embedding, GPT-2的max_len=1024，即每个token最多可以关注1024个位置
+        #    transformer.wte.weight torch.Size([50257, 768]) # weight of token embedding, bert中有self.token_embedding = nn.Embedding(vocab_size, num_hiddens)
+        #    transformer.h.0.ln_1.weight torch.Size([768]) # 这里的h.0, h.1, ..., h.11表示12层Transformer
+        #    transformer.h.0.ln_1.bias torch.Size([768])
+        #    transformer.h.0.attn.c_attn.weight torch.Size([768, 2304])
+        #    transformer.h.0.attn.c_attn.bias torch.Size([2304])
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = nn.LayerNorm(config.n_embd),
+            wte = nn.Embedding(config.vocab_size, config.n_embd), # Transformer图中的OutputEmbedding，即TokenEmbedding
+            wpe = nn.Embedding(config.block_size, config.n_embd), # Transformer图Positional Encoding
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # h[0]对应Transformer图DecoderBlock即灰色块
+            ln_f = nn.LayerNorm(config.n_embd), # yuque中GPT2论文的最后一层是layernorm，是新添加的层
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # Transformer图中Decoder最后的Linear。将Emb映射回vocab表，TransformerDecoder中有
 
         # weight sharing scheme
         self.transformer.wte.weight = self.lm_head.weight
@@ -129,7 +151,9 @@ class GPT(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_type):
-        """Loads pretrained GPT-2 model weights from huggingface"""
+        """Loads pretrained GPT-2 model weights from huggingface
+        下面的实现就是先用config参数初始化一个本文手写的model = GPT(config)，然后初始化一个从HuggingFace初始化的model_hf = GPT2LMHeadModel.from_pretrained(model_type)，之后对应参数的名字、去掉一些buffer参数掩码矩阵参数、对HuggingFace的Tensorflow实现中的一些参数做必要的转置，实现参数的复制。
+        """
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
         from transformers import GPT2LMHeadModel
         print("loading weights from pretrained gpt: %s" % model_type)
@@ -148,7 +172,9 @@ class GPT(nn.Module):
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param
+        sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param. 
+        # .attn.bias是掩码下三角矩阵，仅用于自回归，这里忽略掉了
+        # buffer指的是register_buffer（浏览器收藏夹）中的buffer，这里是说用于mask的那个下三角矩阵或者buffer中的参数，这是在旧的提交中写的（我放在了CausalSelfAttention的注释里）
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -302,7 +328,7 @@ else:
     # vanilla, non-DDP run
     ddp_rank = 0
     ddp_local_rank = 0
-    ddp_world_size = 1
+    ddp_world_size = 1 
     master_process = True
     # attempt to autodetect device
     device = "cpu"
@@ -319,7 +345,7 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-enc = tiktoken.get_encoding("gpt2")
+enc = tiktoken.get_encoding("gpt2") # tokenizer for gpt2
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
 B = 64 # micro batch size
@@ -448,22 +474,23 @@ for step in range(max_steps):
         model.eval()
         num_return_sequences = 4
         max_length = 32
-        tokens = enc.encode("Hello, I'm a language model,")
-        tokens = torch.tensor(tokens, dtype=torch.long)
-        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        tokens = enc.encode("Hello, I'm a language model,") # tokenize，获得一个list of int，https://tiktokenizer.vercel.app/?model=gpt2
+        tokens = torch.tensor(tokens, dtype=torch.long) # shape=(8,) [15496, 11, 314, 1101, 257, 3303, 2746, 11]
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # shape=(5,8)
         xgen = tokens.to(device)
         sample_rng = torch.Generator(device=device)
         sample_rng.manual_seed(42 + ddp_rank)
+        # (B,T)=(5,8)
         while xgen.size(1) < max_length:
             # forward the model to get the logits
             with torch.no_grad():
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(xgen) # (B, T, vocab_size)
-                # take the logits at the last position
+                # 注意只保留seq最后位置的值，take the logits at the last position
                 logits = logits[:, -1, :] # (B, vocab_size)
                 # get the probabilities
                 probs = F.softmax(logits, dim=-1)
-                # do top-k sampling of 50 (huggingface pipeline default)
+                # do top-k sampling of 50，是保留前50个概率，后面的都记为0并重新规范化。这是huggingface pipeline默认做的。
                 # topk_probs here becomes (5, 50), topk_indices is (5, 50)
                 topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
                 # select a token from the top-k probabilities
