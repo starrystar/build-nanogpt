@@ -1,3 +1,17 @@
+# 安装
+python3.10 torch2.0(torch2是在nanogpt的github里写的)
+pip install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 -f https://mirrors.aliyun.com/pytorch-wheels/cu118
+或者手动下载
+numpy2报错，使用pip install "numpy<2"
+    A module that was compiled using NumPy 1.x cannot be run in        
+    NumPy 2.2.4 as it may crash. To support both 1.x and 2.x
+    versions of NumPy, modules must be compiled with NumPy 2.0.        
+    Some module may need to rebuild instead e.g. with 'pybind11>=2.12'.
+
+    If you are a user of the module, the easiest solution will be to   
+    downgrade to 'numpy<2' or try to upgrade the affected module.      
+    We expect that some modules will need time to support NumPy 2.
+
 # build nanoGPT
 
 This repo holds the from-scratch reproduction of [nanoGPT](https://github.com/karpathy/nanoGPT/tree/master). The git commits were specifically kept step by step and clean so that one can easily walk through the git commit history to see it built slowly. Additionally, there is an accompanying [video lecture on YouTube](https://youtu.be/l8pRSuU81PU) where you can see me introduce each commit and explain the pieces along the way.

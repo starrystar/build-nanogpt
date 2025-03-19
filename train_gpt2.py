@@ -503,7 +503,7 @@ for step in range(max_steps):
         # print the generated text
         for i in range(num_return_sequences):
             tokens = xgen[i, :max_length].tolist()
-            decoded = enc.decode(tokens)
+            decoded = enc.decode(tokens) # 这是tiktokenize中的，将token的id->原文。
             print(f"rank {ddp_rank} sample {i}: {decoded}")
 
     # do one step of the optimization
