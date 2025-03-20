@@ -33,13 +33,13 @@ class CausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention，当 is_causal=True 时，函数会自动生成一个下三角矩阵作为掩码
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) # flash attention，当 is_causal=True 时，函数会自动生成一个下三角矩阵作为掩码。
         y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         return y
 
-        # 视频里的实现方法（是旧的提交）
+        # 视频里的实现方法（看最早的提交）
         # self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
         # B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         # # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
@@ -485,7 +485,7 @@ for step in range(max_steps):
             # forward the model to get the logits
             with torch.no_grad():
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(xgen) # (B, T, vocab_size)
+                    logits, loss = model(xgen) # -> logits.shape=torch.Size([B, T, vocab_size])
                 # 注意只保留seq最后位置的值，take the logits at the last position
                 logits = logits[:, -1, :] # (B, vocab_size)
                 # get the probabilities

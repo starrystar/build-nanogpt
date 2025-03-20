@@ -1,6 +1,7 @@
 # 安装
-python3.10 torch2.0(torch2是在nanogpt的github里写的)
+python3.10 torch2.0(torch2.0是在nanogpt的github里写的)
 pip install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 -f https://mirrors.aliyun.com/pytorch-wheels/cu118
+(python3.11.7 torch2.2.2 cpu用>2版本的numpy没报错)
 或者手动下载
 numpy2报错，使用pip install "numpy<2"
     A module that was compiled using NumPy 1.x cannot be run in        
