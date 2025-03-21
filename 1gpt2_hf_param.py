@@ -39,7 +39,7 @@ class CausalSelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
-class CausalSelfAttention1(nn.Module): # 视频里的实现方法（看最早的提交）
+class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product_attention方法（看最早的提交）
 
     def __init__(self, config):
         super().__init__()
@@ -161,7 +161,7 @@ class GPT(nn.Module):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         # forward the token and posisition embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)，注意这里是在输入数据相同的设备上创建的，可以避免设备不一
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
         x = tok_emb + pos_emb

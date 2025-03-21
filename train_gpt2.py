@@ -134,7 +134,7 @@ class GPT(nn.Module):
         B, T = idx.size()
         assert T <= self.config.block_size, f"Cannot forward sequence of length {T}, block size is only {self.config.block_size}"
         # forward the token and posisition embeddings
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device) # shape (T)，注意这里是在输入数据相同的设备上创建的，可以避免设备不一
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (T, n_embd)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
         x = tok_emb + pos_emb
@@ -334,7 +334,7 @@ else:
     device = "cpu"
     if torch.cuda.is_available():
         device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): # mps是苹果芯片的后端
         device = "mps"
     print(f"using device: {device}")
 
