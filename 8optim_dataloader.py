@@ -6,7 +6,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 # -----------------------------------------------------------------------------
-
 class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
@@ -163,6 +162,7 @@ class GPT(nn.Module):
         return model
 
 # -----------------------------------------------------------------------------
+# DataLoader
 import tiktoken
 
 class DataLoaderLite:
@@ -194,7 +194,6 @@ class DataLoaderLite:
             self.current_position = 0
         return x, y
 
-# -----------------------------------------------------------------------------
 # attempt to autodetect the device
 device = "cpu"
 if torch.cuda.is_available():
@@ -205,11 +204,11 @@ print(f"using device: {device}")
 
 train_loader = DataLoaderLite(B=4, T=32)
 
-# get logits
+# -----------------------------------------------------------------------------
+# 训练
 model = GPT(GPTConfig())
 model.to(device)
 
-# optimize!
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
     x, y = train_loader.next_batch()
@@ -222,6 +221,8 @@ for i in range(50):
 
 import sys; sys.exit(0)
 
+# -----------------------------------------------------------------------------
+# 测试
 # prefix tokens
 model.eval()
 num_return_sequences = 5

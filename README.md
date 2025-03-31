@@ -1,25 +1,10 @@
-# 安装
-python3.10 torch2.0(torch2.0是在nanogpt的github里写的)
-pip install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 -f https://mirrors.aliyun.com/pytorch-wheels/cu118
-(python3.11.7 torch2.2.2 cpu用>2版本的numpy没报错)
-或者手动下载
-numpy2报错，使用pip install "numpy<2"
-    A module that was compiled using NumPy 1.x cannot be run in        
-    NumPy 2.2.4 as it may crash. To support both 1.x and 2.x
-    versions of NumPy, modules must be compiled with NumPy 2.0.        
-    Some module may need to rebuild instead e.g. with 'pybind11>=2.12'.
-
-    If you are a user of the module, the easiest solution will be to   
-    downgrade to 'numpy<2' or try to upgrade the affected module.      
-    We expect that some modules will need time to support NumPy 2.
-
 # build nanoGPT
 
-This repo holds the from-scratch reproduction of [nanoGPT](https://github.com/karpathy/nanoGPT/tree/master). The git commits were specifically kept step by step and clean so that one can easily walk through the git commit history to see it built slowly. Additionally, there is an accompanying [video lecture on YouTube](https://youtu.be/l8pRSuU81PU) where you can see me introduce each commit and explain the pieces along the way.
+这个仓库包含了对 nanoGPT (https://github.com/karpathy/nanoGPT/tree/master) 的从零开始的复现。Git 提交记录是精心保留的。
 
-We basically start from an empty file and work our way to a reproduction of the [GPT-2](https://d4mucfpksywv.cloudfront.net/better-language-models/language_models_are_unsupervised_multitask_learners.pdf) (124M) model. If you have more patience or money, the code can also reproduce the [GPT-3](https://arxiv.org/pdf/2005.14165) models. While the GPT-2 (124M) model probably trained for quite some time back in the day (2019, ~5 years ago), today, reproducing it is a matter of ~1hr and ~$10. You'll need a cloud GPU box if you don't have enough, for that I recommend [Lambda](https://lambdalabs.com).
+我们基本上是从一个空文件开始，逐步实现 GPT-2 （124M 参数）模型的复现。如果你有更多耐心或预算，这套代码也可以用于训练更大的 [GPT-3](https://arxiv.org/pdf/2005.14165) 模型。虽然 GPT-2（124M）模型早在 2019 年（大约五年前）训练时花费了相当长的时间，但在今天，复现它只需约 1 小时和约 10 美元的成本。如果你本地没有足够的 GPU 资源，建议使用云服务上的 GPU 机器，我推荐使用 Lambda Labs 。
 
-Note that GPT-2 and GPT-3 and both simple language models, trained on internet documents, and all they do is "dream" internet documents. So this repo/video this does not cover Chat finetuning, and you can't talk to it like you can talk to ChatGPT. The finetuning process (while quite simple conceptually - SFT is just about swapping out the dataset and continuing the training) comes after this part and will be covered at a later time. For now this is the kind of stuff that the 124M model says if you prompt it with "Hello, I'm a language model," after 10B tokens of training:
+请注意，GPT-2 和 GPT-3 都是简单的语言模型，它们是在互联网文本上训练的，其功能本质上就是“生成”互联网风格的文本。因此，本仓库/视频并未涉及像 ChatGPT 那样的对话式微调（Chat fine-tuning），你也不能像与 ChatGPT 对话那样与它互动。微调过程（尽管从概念上讲很简单——SFT 只需更换数据集并继续训练）属于后续步骤，我们将在以后的内容中再做讲解。目前来看，当你用 "Hello, I'm a language model" 这样的提示词去引导这个经过约 100 亿 token 训练的 124M 模型时，它会输出类似下面这样的内容：
 
 ```
 Hello, I'm a language model, and my goal is to make English as easy and fun as possible for everyone, and to find out the different grammar rules
@@ -37,8 +22,6 @@ Hello, I'm a language model, but I'm talking about data. You've got to create an
 Hello, I'm a language model, and all of this is about modeling and learning Python. I'm very good in syntax, however I struggle with Python due
 ```
 
-Lol. Anyway, once the video comes out, this will also be a place for FAQ, and a place for fixes and errata, of which I am sure there will be a number :)
-
 For discussions and questions, please use [Discussions tab](https://github.com/karpathy/build-nanogpt/discussions), and for faster communication, have a look at my [Zero To Hero Discord](https://discord.gg/3zy8kqD9Cp), channel **#nanoGPT**:
 
 [![](https://dcbadge.vercel.app/api/server/3zy8kqD9Cp?compact=true&style=flat)](https://discord.gg/3zy8kqD9Cp)
@@ -47,15 +30,13 @@ For discussions and questions, please use [Discussions tab](https://github.com/k
 
 [Let's reproduce GPT-2 (124M) YouTube lecture](https://youtu.be/l8pRSuU81PU)
 
-## Errata
+## (Green) Errata
 
-Minor cleanup, we forgot to delete `register_buffer` of the bias once we switched to flash attention, fixed with a recent PR.
+小的清理工作：在我们切换到使用 flash attention 后，忘记删除之前用于注册 bias 的 register_buffer，这个问题最近通过一个 PR 得到了修复。
 
-Earlier version of PyTorch may have difficulty converting from uint16 to long. Inside `load_tokens`, we added `npt = npt.astype(np.int32)` to use numpy to convert uint16 to int32 before converting to torch tensor and then converting to long.
+torch.autocast 函数需要一个参数 device_type，我之前固执地直接传入了完整的 device（比如 cuda:3），希望它也能正常工作。但实际上，在某些版本的 PyTorch 中，它确实要求只传设备类型，这会导致错误。所以我们需要把像 cuda:3 这样的设备名称简化为 cuda。目前，对于 Apple Silicon 上的 mps 设备，它会被当作 cpu 类型处理，我不太确定这是否是 PyTorch 的预期行为。
 
-The `torch.autocast` function takes an arg `device_type`, to which I tried to stubbornly just pass `device` hoping it works ok, but PyTorch actually really wants just the type and creates errors in some version of PyTorch. So we want e.g. the device `cuda:3` to get stripped to `cuda`. Currently, device `mps` (Apple Silicon) would become `device_type` CPU, I'm not 100% sure this is the intended PyTorch way.
-
-Confusingly, `model.require_backward_grad_sync` is actually used by both the forward and backward pass. Moved up the line so that it also gets applied to the forward pass. 
+令人困惑的是，model.require_backward_grad_sync 实际上会在前向传播和反向传播中都被用到。因此我们把这个语句提前，以确保它也作用于前向传播过程。
 
 ## Prod
 

@@ -39,7 +39,7 @@ class CausalSelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
-class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product_attention方法（看最早的提交）
+class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product_attention方法（看最早的提交），注意用F.scale**是flash-attn的加速实现
 
     def __init__(self, config):
         super().__init__()
@@ -61,7 +61,7 @@ class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product
         # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
         # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
         qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        q, k, v = qkv.split(self.n_embd, dim=2) # 在第dim维度上，按照大小为self.n_embd=768分割，这里也就是把qkv在dim=2上有3*768个维度切成三块
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)=torch.Size([5, 12, 8, 64])
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -100,7 +100,6 @@ class Block(nn.Module):
         self.mlp = MLP(config) # 即FFN
 
     def forward(self, x):
-        # Trans DeBlock中Y=ln{X+drop[attn(X)]}。而下面的代码是GPT-2对Transformer的改进，梯度从输出开始计算就是一个加法，使得从top开始的梯度可以分为两个分支，残差分支的梯度直接从最后的输出到了输入，另一个分支则经过一系列复杂的层的变化到达输入。
         x = x + self.attn(self.ln_1(x)) 
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -114,10 +113,7 @@ class GPTConfig:
     n_embd: int = 768 # embedding dimension
 
 class GPT(nn.Module):
-    # 注意！！！！
-    # 注意！！！！
-    # 注意！！！！
-    # 本实现不包含在训练和eval时表现不同的modules和layers（如dropout、batchnorm或其他层）
+    # 本实现没有包含那些在训练和eval时表现不同的modules和layers（如dropout、batchnorm或其他层），也就是训练和eval都使用这份代码。
 
     def __init__(self, config):
         super().__init__()
@@ -201,7 +197,8 @@ class GPT(nn.Module):
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param. 
         # .attn.bias是掩码下三角矩阵，仅用于自回归，这里忽略掉了
-        # buffer指的是register_buffer（浏览器收藏夹）中的buffer，这里是说用于mask的那个下三角矩阵或者buffer中的参数，这是在旧的提交中写的（我放在了CausalSelfAttention的注释里）
+        # buffer指的是register_buffer（即模型定义的不更新的参数），这里是说用于mask的那个下三角矩阵或者buffer中的参数，这是在旧的提交中写的（我放在了CausalSelfAttention的注释里）
+
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -229,39 +226,43 @@ class GPT(nn.Module):
 
         return model
 
-# create model
-# model = GPT(GPTConfig(vocab_size=50304))
-model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+# -----------------------------------------------------------------------------
+# 初始化模型
+model = GPT.from_pretrained("gpt2") # 使用HuggingFace库加载OpenAI GPT-2发布的权重
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
 model.to(device)
 model.eval()
-num_return_sequences = 5
-max_length = 32
+num_return_sequences = 5 # 对一个开头生成5种答案
+max_length = 32 # 句子最长32
 
+# -----------------------------------------------------------------------------
+# 这段内容是把"Hello, I'm a language model,"转变成token_id
 import tiktoken
-enc = tiktoken.get_encoding("gpt2") # tokenizer for gpt2
+enc = tiktoken.get_encoding("gpt2") # gpt2的tokenizer
 tokens = enc.encode("Hello, I'm a language model,") # tokenize，获得一个list of int，https://tiktokenizer.vercel.app/?model=gpt2
 tokens = torch.tensor(tokens, dtype=torch.long) # shape=(8,) [15496, 11, 314, 1101, 257, 3303, 2746, 11]
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # shape=(5,8)
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1) # 复制5份，shape=(5,8)
 xgen = tokens.to(device)
+
+# -----------------------------------------------------------------------------
+# 逐token生成直到达到句子的最大长度，最后打印
 sample_rng = torch.Generator(device=device)
 sample_rng.manual_seed(42)
-# (B,T)=(5,8)
 while xgen.size(1) < max_length:
     # forward the model to get the logits
-    with torch.no_grad():
+    with torch.no_grad(): # 这样就不用保存中间变量，也不必为backward做任何准备
         # xgen.shape=torch.Size([5, 8])
         logits, loss = model(xgen) # -> logits.shape=torch.Size([B=5, T=8, vocab_size=50257])
         # 注意只保留seq最后位置的值，take the logits at the last position
-        logits = logits[:, -1, :] # (B=5, vocab_size=50257)
+        logits = logits[:, -1, :] # shape=(B=5, vocab_size=50257)
         # get the probabilities
         probs = F.softmax(logits, dim=-1)
-        # do top-k sampling of 50，是保留前50个概率，后面的都记为0并重新规范化。这是huggingface pipeline默认做的。
+        # do top-k sampling of 50，是保留前50大的概率，后面的都记为0并重新规范化。这是huggingface pipeline默认做的。
         # topk_probs here becomes (5, 50), topk_indices is (5, 50)
         topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        # select a token from the top-k probabilities
+        # multinomial select a token from the top-k probabilities
         # note: multinomial does not demand the input to sum to 1
         ix = torch.multinomial(topk_probs, 1, generator=sample_rng) # ix.shape=(B=5, 1)
         # gather the corresponding indices

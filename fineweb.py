@@ -1,4 +1,6 @@
 """
+本篇文档Karp说没啥意思就没细讲，运行本文会生成几个分片文件，每个文件存储一个Numpy数组？000是validation用的，其他都是train用的。
+最后生成100个文件，每个文件100M个token。100个文件就是100亿tokens。
 FineWeb-Edu dataset (for srs pretraining)
 https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
 Downloads and tokenizes the data and saves data shards to disk.
@@ -28,14 +30,14 @@ fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train")
 
 # init the tokenizer
 enc = tiktoken.get_encoding("gpt2")
-eot = enc._special_tokens['<|endoftext|>'] # end of text token
+eot = enc._special_tokens['<|endoftext|>'] # end of text token，虽然叫eot，但这里当文档开头用
 def tokenize(doc):
     # tokenizes a single document and returns a numpy array of uint16 tokens
     tokens = [eot] # the special <|endoftext|> token delimits all documents
     tokens.extend(enc.encode_ordinary(doc["text"]))
     tokens_np = np.array(tokens)
     assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large for uint16"
-    tokens_np_uint16 = tokens_np.astype(np.uint16)
+    tokens_np_uint16 = tokens_np.astype(np.uint16) # 2^16=65535，大于gpt2的token数，够用了
     return tokens_np_uint16
 
 def write_datafile(filename, tokens_np):

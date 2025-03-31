@@ -29,7 +29,7 @@ class CausalSelfAttention(nn.Module):
         # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
         # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
         qkv = self.c_attn(x)
-        q, k, v = qkv.split(self.n_embd, dim=2)
+        q, k, v = qkv.split(self.n_embd, dim=2) # 在第dim维度上，按照大小为self.n_embd=768分割，这里也就是把qkv在dim=2上有3*768个维度切成三块
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -73,7 +73,7 @@ class Block(nn.Module):
         self.mlp = MLP(config) # 即FFN
 
     def forward(self, x):
-        # Trans DeBlock中Y=ln{X+drop[attn(X)]}。而下面的代码是GPT-2对Transformer的改进，梯度从输出开始计算就是一个加法，使得从top开始的梯度可以分为两个分支，残差分支的梯度直接从最后的输出到了输入，另一个分支则经过一系列复杂的层的变化到达输入。
+        # Trans DeBlock中attn->add->norm即Y=ln{X+drop[attn(X)]}。而下面的代码是GPT-2对Transformer的改进，加法可以在backward过程中把梯度均匀地分配给两个分支，残差分支的梯度直接从最后的输出到了输入，另一个分支则经过一系列复杂的层的变化到达输入。
         x = x + self.attn(self.ln_1(x)) 
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -87,16 +87,13 @@ class GPTConfig:
     n_embd: int = 768 # embedding dimension
 
 class GPT(nn.Module):
-    # 注意！！！！
-    # 注意！！！！
-    # 注意！！！！
-    # 本实现不包含在训练和eval时表现不同的modules和layers（如dropout、batchnorm或其他层）
+    # 本实现没有包含那些在训练和eval时表现不同的modules和layers（如dropout、batchnorm或其他层），也就是训练和eval都使用这份代码。
 
     def __init__(self, config):
         super().__init__()
         self.config = config
 
-        # nn.ModuleDict像是nn.ModuleList，可以使用对应的名字获取该子Module
+        # nn.ModuleDict即nn.ModuleList变成了Dict，可以使用对应的名字获取该子Module。这里起这个名字是要对应HuggingFace的模型结构，以便直接加载它的参数。
         # 这里的wte、wpe等等都是对应到play.ipynb中的state_dict：
         #    transformer.wpe.weight torch.Size([1024, 768]) # position embedding, GPT-2的max_len=1024，即每个token最多可以关注1024个位置
         #    transformer.wte.weight torch.Size([50257, 768]) # weight of token embedding, bert中有self.token_embedding = nn.Embedding(vocab_size, num_hiddens)
@@ -107,10 +104,10 @@ class GPT(nn.Module):
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd), # Transformer图中的OutputEmbedding，即TokenEmbedding
             wpe = nn.Embedding(config.block_size, config.n_embd), # Transformer图Positional Encoding
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # h[0]对应Transformer图DecoderBlock即灰色块
-            ln_f = nn.LayerNorm(config.n_embd), # yuque中GPT2论文的最后一层是layernorm，是新添加的层
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]), # h[0]对应Transformer图DecoderBlock即浅灰色块(边上有N×那个)
+            ln_f = nn.LayerNorm(config.n_embd), # GPT2论文在final self-attention block之后新加的一层layernorm
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # Transformer图中Decoder最后的Linear。将Emb映射回vocab表，TransformerDecoder中有
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # Transformer图中DecoderBlock结束后的分类Linear，将Emb映射回token，此处从768维映射回词表大小50257
 
         # weight sharing scheme
         self.transformer.wte.weight = self.lm_head.weight
@@ -120,9 +117,9 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            std = 0.02
+            std = 0.02 # 通常使用Xavier初始化时，std是1/sqrt(dim=768)~=0.036, 1/sqrt(dim=1600)~=0.025
             if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * self.config.n_layer) ** -0.5
+                std *= (2 * self.config.n_layer) ** -0.5 #  # gpt2论文中，采用了一种改进的初始化方法，该方法考虑了随着模型深度增加在残差路径上的累积效应。因为累积了n_layer层，所以乘以1/sqrt(2*n_layer)。这里2倍是因为每个Block中都有两个块添加到残差路径中：x+=, x+=
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -174,7 +171,7 @@ class GPT(nn.Module):
         sd_keys = sd.keys()
         sd_keys = [k for k in sd_keys if not k.endswith('.attn.bias')] # discard this mask / buffer, not a param. 
         # .attn.bias是掩码下三角矩阵，仅用于自回归，这里忽略掉了
-        # buffer指的是register_buffer（浏览器收藏夹）中的buffer，这里是说用于mask的那个下三角矩阵或者buffer中的参数，这是在旧的提交中写的（我放在了CausalSelfAttention的注释里）
+        # buffer指的是register_buffer（即模型定义的不更新的参数），这里是说用于mask的那个下三角矩阵或者buffer中的参数，这是在旧的提交中写的（我放在了CausalSelfAttention的注释里）
 
         # init a huggingface/transformers model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -184,6 +181,8 @@ class GPT(nn.Module):
         sd_keys_hf = sd_hf.keys()
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
+        
+        # 下面这一块的内容就是：tf中定义的参数权重与pytorch中所需要的差一个转置
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
@@ -233,7 +232,7 @@ import numpy as np
 
 def load_tokens(filename):
     npt = np.load(filename)
-    npt = npt.astype(np.int32) # added after video
+    npt = npt.astype(np.int32) # added after video，较早版本的 PyTorch 可能在将 uint16 转换为 long 类型时会遇到困难。在 load_tokens 函数中，我们添加了 npt = npt.astype(np.int32)，即先用 numpy 将 uint16 转换为 int32，然后再转换为 torch 张量，并最终转换为 long 类型。
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt
 
@@ -305,6 +304,7 @@ def get_most_likely_row(tokens, mask, logits):
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=8 train_gpt2.py
+# 
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -313,14 +313,14 @@ import torch.distributed as dist
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run? 这里只是为了检测本次运行是不是ddp方式，就是方式看起来不太好
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
     init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    ddp_rank = int(os.environ['RANK']) # GPU0的rank是0，GPU1的rank是1
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # 是节点上的rank，比如视频中只有一个节点且该节点有8张GPU，那么这里就是0-7。
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # 总共有8张GPU，8个进程
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
@@ -348,11 +348,11 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2") # tokenizer for gpt2
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 64 # micro batch size
-T = 1024 # sequence length
+B = 64 # micro batch size A100-80G可以放这么多，大概1.5h就能跑完
+T = 1024 # sequence length, GPT3中是2048
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-if master_process:
+if master_process: # 这样就只有“主进程”打印，其他几个辅助进程就不用打印相同的东西了
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
@@ -372,14 +372,14 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 6e-4
+max_lr = 6e-4 # 有人做了尝试可以更高，比如3倍，训得更快
 min_lr = max_lr * 0.1
-warmup_steps = 715
-max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 715 # 375m tokens warm up, 也就是 (375e6 / 2**19 ~= 715)
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens (10e9 / 2**19 ~= 19073)
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
-        return max_lr * (it+1) / warmup_steps
+        return max_lr * (it+1) / warmup_steps # 视频里lr最开始从min_lr=6e-5开始的，从0开始的学习率没有用，所以是it+1。
     # 2) if it > lr_decay_iters, return min learning rate
     if it > max_steps:
         return min_lr
@@ -437,7 +437,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step % 250 == 0 or last_step) and (not use_compile): # 这里not use_compile是因为Karp说报错了，得把compile去掉
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -450,9 +450,13 @@ for step in range(max_steps):
             mask = mask.to(device)
             # get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16): # 这只在Ampere(2020)+架构显卡中支持。
+                    # import code;code.interact(local=locals()) # 见onenote python
+                    # logits.dtype=torch.bfloat16
+                    # model.transformer.wte.weight.dtype=torch.float32
+                    # 这就是我们获得混合精度的原因。PyTorch保留一些内容在float32中，并将一些内容转换为低精度。
                     logits, loss = model(tokens)
-                pred_norm = get_most_likely_row(tokens, mask, logits)
+                pred_norm = get_most_likely_row(tokens, mask, logits) # 预测
             num_total += 1
             num_correct_norm += int(pred_norm == label)
         # reduce the stats across all processes
@@ -526,6 +530,7 @@ for step in range(max_steps):
         loss_accum += loss.detach()
         loss.backward()
     if ddp:
+        # 这个操作会把所有GPU上的该张量求AVG，然后将平均值存入所有rank GPU。
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration
@@ -534,7 +539,7 @@ for step in range(max_steps):
         param_group['lr'] = lr
     optimizer.step()
     if device_type == "cuda":
-        torch.cuda.synchronize() # wait for the GPU to finish work
+        torch.cuda.synchronize() # wait for the GPU to finish work，否则GPU的任务还没有跑完的话time.time()计时就是不准确的
     t1 = time.time()
     dt = t1 - t0 # time difference in seconds
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
