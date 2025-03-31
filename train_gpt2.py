@@ -120,9 +120,9 @@ class GPT(nn.Module):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            std = 0.02
-            if hasattr(module, 'NANOGPT_SCALE_INIT'):
-                std *= (2 * self.config.n_layer) ** -0.5
+            std = 0.02 # 通常使用Xavier初始化时，std是1/sqrt(dim=768)~=0.036
+            if hasattr(module, 'NANOGPT_SCALE_INIT'): # gpt2论文中，采用了一种改进的初始化方法，该方法考虑了随着模型深度增加在残差路径上的累积效应。因为累积了n_layer层，所以乘以1/sqrt(n_layer)。
+                std *= (2 * self.config.n_layer) ** -0.5 # 这里2倍是因为每个Block中都有两个块添加到残差路径中：x+=, x+=
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
@@ -305,6 +305,7 @@ def get_most_likely_row(tokens, mask, logits):
 # python train_gpt2.py
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=8 train_gpt2.py
+# 
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -313,14 +314,14 @@ import torch.distributed as dist
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run? 这里只是为了检测本次运行是不是ddp方式，就是方式看起来不太好
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
     assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
     init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    ddp_rank = int(os.environ['RANK']) # GPU0的rank是0，GPU1的rank是1
+    ddp_local_rank = int(os.environ['LOCAL_RANK']) # 是节点上的rank，比如视频中只有一个节点且该节点有8张GPU，那么这里就是0-7。
+    ddp_world_size = int(os.environ['WORLD_SIZE']) # 总共有8张GPU，8个进程
     device = f'cuda:{ddp_local_rank}'
     torch.cuda.set_device(device)
     master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
@@ -348,11 +349,11 @@ if torch.cuda.is_available():
 enc = tiktoken.get_encoding("gpt2") # tokenizer for gpt2
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens
-B = 64 # micro batch size
-T = 1024 # sequence length
+B = 64 # micro batch size A100-80G可以放这么多，大概1.5h就能跑完
+T = 1024 # sequence length, GPT3中是2048
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
-if master_process:
+if master_process: # 这样就只有“主进程”打印，其他几个辅助进程就不用打印相同的东西了
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
@@ -372,14 +373,14 @@ if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 6e-4
+max_lr = 6e-4 # 有人做了尝试可以更高，比如3倍，训得更快
 min_lr = max_lr * 0.1
-warmup_steps = 715
-max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 715 # 375m tokens warm up, 也就是 (375e6 / 2**19 ~= 715)
+max_steps = 19073 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens (10e9 / 2**19 ~= 19073)
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
-        return max_lr * (it+1) / warmup_steps
+        return max_lr * (it+1) / warmup_steps # 视频里lr最开始从min_lr=6e-5开始的，从0开始的学习率没有用，所以是it+1。
     # 2) if it > lr_decay_iters, return min learning rate
     if it > max_steps:
         return min_lr
@@ -437,7 +438,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step % 250 == 0 or last_step) and (not use_compile): # 这里not use_compile是因为Karp说报错了，得把compile去掉
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -450,9 +451,13 @@ for step in range(max_steps):
             mask = mask.to(device)
             # get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16): # 这只在Ampere(2020)+架构显卡中支持。
+                    # import code;code.interact(local=locals()) # 见onenote python
+                    # logits.dtype=torch.bfloat16
+                    # model.transformer.wte.weight.dtype=torch.float32
+                    # 这就是我们获得混合精度的原因。PyTorch保留一些内容在float32中，并将一些内容转换为低精度。
                     logits, loss = model(tokens)
-                pred_norm = get_most_likely_row(tokens, mask, logits)
+                pred_norm = get_most_likely_row(tokens, mask, logits) # 预测
             num_total += 1
             num_correct_norm += int(pred_norm == label)
         # reduce the stats across all processes
@@ -526,6 +531,7 @@ for step in range(max_steps):
         loss_accum += loss.detach()
         loss.backward()
     if ddp:
+        # 这个操作会把所有GPU上的该张量求AVG，然后将平均值存入所有rank GPU。
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # determine and set the learning rate for this iteration

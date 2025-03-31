@@ -39,7 +39,7 @@ class CausalSelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
-class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product_attention方法（看最早的提交）
+class CausalSelfAttention1(nn.Module): # 视频里逐行实现scaled_dot_product_attention方法（看最早的提交），注意用F.scale**是flash-attn的加速实现
 
     def __init__(self, config):
         super().__init__()
